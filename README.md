@@ -46,6 +46,34 @@ result = agent.invoke({"messages": [{"role": "user", "content": "What is LangGra
 
 The agent created with `create_deep_agent` is a compiled [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) `StateGraph`, so it can be used with streaming, human-in-the-loop, memory, or Studio just like any LangGraph agent. See our [quickstarts repo](https://github.com/langchain-ai/deepagents-quickstarts) for more examples.
 
+## CLI Configuration
+
+Deep Agents CLI supports custom API base URLs for third-party services that are compatible with OpenAI or Anthropic APIs.
+
+### `base_url`
+
+- CLI flag: `--base-url` (overrides environment variables)
+- Environment variables:
+  - `OPENAI_BASE_URL`
+  - `ANTHROPIC_BASE_URL`
+  - `GOOGLE_BASE_URL`
+- Use `--provider` when the model name doesn't imply a provider.
+- Note: `langchain-google-genai` may not support custom `base_url`, so Google endpoints can be ignored by the underlying client.
+
+```bash
+# Zhipu developer plan (Anthropic-compatible endpoint)
+export ANTHROPIC_API_KEY="34d9d991**************CXE1"
+export ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic"
+deepagents --model GLM-4.7 --provider anthropic
+
+# OpenAI-compatible endpoints (examples)
+export OPENAI_BASE_URL="https://api.deepseek.com/v1"
+deepagents --model deepseek-chat --provider openai
+
+# Override at runtime
+deepagents --model llama-3.1-70b --provider openai --base-url https://api.groq.com/openai/v1
+```
+
 ## Customizing Deep Agents
 
 There are several parameters you can pass to [`create_deep_agent`](https://reference.langchain.com/python/deepagents/#deepagents.create_deep_agent).
