@@ -162,6 +162,9 @@ class Settings:
     google_api_key: str | None
     tavily_api_key: str | None
 
+    # Google Cloud configuration (for VertexAI)
+    google_cloud_project: str | None
+
     # Custom API base URLs (for third-party compatible services)
     openai_base_url: str | None
     anthropic_base_url: str | None
@@ -194,6 +197,7 @@ class Settings:
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
         google_key = os.environ.get("GOOGLE_API_KEY")
         tavily_key = os.environ.get("TAVILY_API_KEY")
+        google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
 
         # Detect custom API base URLs
         openai_base_url = os.environ.get("OPENAI_BASE_URL")
@@ -216,6 +220,7 @@ class Settings:
             anthropic_api_key=anthropic_key,
             google_api_key=google_key,
             tavily_api_key=tavily_key,
+            google_cloud_project=google_cloud_project,
             openai_base_url=openai_base_url,
             anthropic_base_url=anthropic_base_url,
             google_base_url=google_base_url,

@@ -178,6 +178,7 @@ class TestSettingsBaseUrl:
             anthropic_api_key=None,
             google_api_key=None,
             tavily_api_key=None,
+            google_cloud_project=None,
             openai_base_url="https://custom.api.com/v1",
             anthropic_base_url=None,
             google_base_url=None,
