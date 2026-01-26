@@ -240,6 +240,15 @@ class Settings:
         return self.google_api_key is not None
 
     @property
+    def has_vertex_ai(self) -> bool:
+        """Check if VertexAI is available (Google Cloud project set, but no Google API key).
+
+        VertexAI uses Application Default Credentials (ADC) for authentication,
+        so if GOOGLE_CLOUD_PROJECT is set and GOOGLE_API_KEY is not, we assume VertexAI.
+        """
+        return self.google_cloud_project is not None and self.google_api_key is None
+
+    @property
     def has_tavily(self) -> bool:
         """Check if Tavily API key is configured."""
         return self.tavily_api_key is not None
@@ -444,15 +453,22 @@ def _detect_provider(model_name: str) -> str | None:
         model_name: Model name to detect provider from
 
     Returns:
-        Provider name (openai, anthropic, google) or None if can't detect
+        Provider name (openai, anthropic, google, vertexai) or None if can't detect
     """
     model_lower = model_name.lower()
+
+    # Check for model name patterns
     if any(x in model_lower for x in ["gpt", "o1", "o3"]):
         return "openai"
     if "claude" in model_lower:
+        if not settings.has_anthropic and settings.has_vertex_ai:
+            return "vertexai"
         return "anthropic"
     if "gemini" in model_lower:
+        if settings.has_vertex_ai:
+            return "vertexai"
         return "google"
+
     return None
 
 

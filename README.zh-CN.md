@@ -208,7 +208,7 @@ agent = create_deep_agent(
 
 ### `interrupt_on`
 
-部分工具较为敏感，执行前可能需要人工批准。Deepagents 通过 LangGraph 的中断能力支持人类在回路（HITL）工作流。你可以使用 checkpointer 配置哪些工具需要审批。
+部分工具较为敏感，执行前可能需要人工批准。Deepagents 通过 LangGraph 的中断能力支持人机交互（HITL）工作流。你可以使用 checkpointer 配置哪些工具需要审批。
 
 这些工具配置会传给预构建的 [HITL 中间件](https://docs.langchain.com/oss/python/langchain/middleware#human-in-the-loop)，使 agent 在执行配置工具前暂停并等待用户反馈。
 

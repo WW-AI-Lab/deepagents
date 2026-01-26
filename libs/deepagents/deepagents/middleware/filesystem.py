@@ -20,8 +20,9 @@ from langgraph.types import Command
 from typing_extensions import TypedDict
 
 from deepagents.backends import StateBackend
+from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.protocol import (
-    BACKEND_TYPES as BACKEND_TYPES,  # Re-export for backwards compatibility
+    BACKEND_TYPES as BACKEND_TYPES,  # Re-export type here for backwards compatibility
     BackendProtocol,
     EditResult,
     SandboxBackendProtocol,
@@ -39,6 +40,21 @@ EMPTY_CONTENT_WARNING = "System reminder: File exists but has empty contents"
 LINE_NUMBER_WIDTH = 6
 DEFAULT_READ_OFFSET = 0
 DEFAULT_READ_LIMIT = 100
+
+# Template for truncation message in read_file
+# {file_path} will be filled in at runtime
+READ_FILE_TRUNCATION_MSG = (
+    "\n\n[Output was truncated due to size limits. "
+    "The file content is very large. "
+    "Consider reformatting the file to make it easier to navigate. "
+    "For example, if this is JSON, use execute(command='jq . {file_path}') to pretty-print it with line breaks. "
+    "For other formats, you can use appropriate formatting tools to split long lines.]"
+)
+
+# Approximate number of characters per token for truncation calculations.
+# Using 4 chars per token as a conservative approximation (actual ratio varies by content)
+# This errs on the high side to avoid premature eviction of content that might fit
+NUM_CHARS_PER_TOKEN = 4
 
 
 class FileData(TypedDict):
@@ -338,12 +354,14 @@ def _ls_tool_generator(
 def _read_file_tool_generator(
     backend: BackendProtocol | Callable[[ToolRuntime], BackendProtocol],
     custom_description: str | None = None,
+    token_limit_before_truncation: int | None = None,
 ) -> BaseTool:
     """Generate the read_file tool.
 
     Args:
         backend: Backend to use for file storage, or a factory function that takes runtime and returns a backend.
         custom_description: Optional custom description for the tool.
+        token_limit_before_truncation: Optional token limit before truncating output.
 
     Returns:
         Configured read_file tool that reads files using the backend.
@@ -366,6 +384,14 @@ def _read_file_tool_generator(
             lines = lines[:limit]
             result = "".join(lines)
 
+        # Check if result exceeds token threshold and truncate if necessary
+        if token_limit_before_truncation and len(result) >= NUM_CHARS_PER_TOKEN * token_limit_before_truncation:
+            # Calculate truncation message length to ensure final result stays under threshold
+            truncation_msg = READ_FILE_TRUNCATION_MSG.format(file_path=file_path)
+            max_content_length = NUM_CHARS_PER_TOKEN * token_limit_before_truncation - len(truncation_msg)
+            result = result[:max_content_length]
+            result += truncation_msg
+
         return result
 
     async def async_read_file(
@@ -383,6 +409,14 @@ def _read_file_tool_generator(
         if len(lines) > limit:
             lines = lines[:limit]
             result = "".join(lines)
+
+        # Check if result exceeds token threshold and truncate if necessary
+        if token_limit_before_truncation and len(result) >= NUM_CHARS_PER_TOKEN * token_limit_before_truncation:
+            # Calculate truncation message length to ensure final result stays under threshold
+            truncation_msg = READ_FILE_TRUNCATION_MSG.format(file_path=file_path)
+            max_content_length = NUM_CHARS_PER_TOKEN * token_limit_before_truncation - len(truncation_msg)
+            result = result[:max_content_length]
+            result += truncation_msg
 
         return result
 
@@ -666,9 +700,6 @@ def _supports_execution(backend: BackendProtocol) -> bool:
     Returns:
         True if the backend supports execution, False otherwise.
     """
-    # Import here to avoid circular dependency
-    from deepagents.backends.composite import CompositeBackend
-
     # For CompositeBackend, check the default backend
     if isinstance(backend, CompositeBackend):
         return isinstance(backend.default, SandboxBackendProtocol)
@@ -766,6 +797,37 @@ def _execute_tool_generator(
     )
 
 
+# Tools that should be excluded from the large result eviction logic.
+#
+# This tuple contains tools that should NOT have their results evicted to the filesystem
+# when they exceed token limits. Tools are excluded for different reasons:
+#
+# 1. Tools with built-in truncation (ls, glob, grep):
+#    These tools truncate their own output when it becomes too large. When these tools
+#    produce truncated output due to many matches, it typically indicates the query
+#    needs refinement rather than full result preservation. In such cases, the truncated
+#    matches are potentially more like noise and the LLM should be prompted to narrow
+#    its search criteria instead.
+#
+# 2. Tools with problematic truncation behavior (read_file):
+#    read_file is tricky to handle as the failure mode here is single long lines
+#    (e.g., imagine a jsonl file with very long payloads on each line). If we try to
+#    truncate the result of read_file, the agent may then attempt to re-read the
+#    truncated file using read_file again, which won't help.
+#
+# 3. Tools that never exceed limits (edit_file, write_file):
+#    These tools return minimal confirmation messages and are never expected to produce
+#    output large enough to exceed token limits, so checking them would be unnecessary.
+TOOLS_EXCLUDED_FROM_EVICTION = (
+    "ls",
+    "glob",
+    "grep",
+    "read_file",
+    "edit_file",
+    "write_file",
+)
+
+
 TOOL_GENERATORS = {
     "ls": _ls_tool_generator,
     "read_file": _read_file_tool_generator,
@@ -780,12 +842,14 @@ TOOL_GENERATORS = {
 def _get_filesystem_tools(
     backend: BackendProtocol,
     custom_tool_descriptions: dict[str, str] | None = None,
+    token_limit_before_truncation: int | None = None,
 ) -> list[BaseTool]:
     """Get filesystem and execution tools.
 
     Args:
         backend: Backend to use for file storage and optional execution, or a factory function that takes runtime and returns a backend.
         custom_tool_descriptions: Optional custom descriptions for tools.
+        token_limit_before_truncation: Optional token limit before truncating read_file output.
 
     Returns:
         List of configured tools: ls, read_file, write_file, edit_file, glob, grep, execute.
@@ -795,7 +859,15 @@ def _get_filesystem_tools(
     tools = []
 
     for tool_name, tool_generator in TOOL_GENERATORS.items():
-        tool = tool_generator(backend, custom_tool_descriptions.get(tool_name))
+        # Pass token_limit_before_truncation to read_file generator
+        if tool_name == "read_file":
+            tool = tool_generator(
+                backend,
+                custom_tool_descriptions.get(tool_name),
+                token_limit_before_truncation,
+            )
+        else:
+            tool = tool_generator(backend, custom_tool_descriptions.get(tool_name))
         tools.append(tool)
     return tools
 
@@ -805,9 +877,41 @@ You can read the result from the filesystem by using the read_file tool, but mak
 You can do this by specifying an offset and limit in the read_file tool call.
 For example, to read the first 100 lines, you can use the read_file tool with offset=0 and limit=100.
 
-Here are the first 10 lines of the result:
+Here is a preview showing the head and tail of the result (lines of the form
+... [N lines truncated] ...
+indicate omitted lines in the middle of the content):
+
 {content_sample}
 """
+
+
+def _create_content_preview(content_str: str, *, head_lines: int = 5, tail_lines: int = 5) -> str:
+    """Create a preview of content showing head and tail with truncation marker.
+
+    Args:
+        content_str: The full content string to preview.
+        head_lines: Number of lines to show from the start.
+        tail_lines: Number of lines to show from the end.
+
+    Returns:
+        Formatted preview string with line numbers.
+    """
+    lines = content_str.splitlines()
+
+    if len(lines) <= head_lines + tail_lines:
+        # If file is small enough, show all lines
+        preview_lines = [line[:1000] for line in lines]
+        return format_content_with_line_numbers(preview_lines, start_line=1)
+
+    # Show head and tail with truncation marker
+    head = [line[:1000] for line in lines[:head_lines]]
+    tail = [line[:1000] for line in lines[-tail_lines:]]
+
+    head_sample = format_content_with_line_numbers(head, start_line=1)
+    truncation_notice = f"\n... [{len(lines) - head_lines - tail_lines} lines truncated] ...\n"
+    tail_sample = format_content_with_line_numbers(tail, start_line=len(lines) - tail_lines + 1)
+
+    return head_sample + truncation_notice + tail_sample
 
 
 class FilesystemMiddleware(AgentMiddleware):
@@ -888,7 +992,11 @@ class FilesystemMiddleware(AgentMiddleware):
         # Set system prompt (allow full override or None to generate dynamically)
         self._custom_system_prompt = system_prompt
 
-        self.tools = _get_filesystem_tools(self.backend, custom_tool_descriptions)
+        self.tools = _get_filesystem_tools(
+            self.backend,
+            custom_tool_descriptions,
+            tool_token_limit_before_evict,
+        )
 
     def _get_backend(self, runtime: ToolRuntime) -> BackendProtocol:
         """Get the resolved backend instance from backend or factory.
@@ -1045,9 +1153,7 @@ class FilesystemMiddleware(AgentMiddleware):
             content_str = str(message.content)
 
         # Check if content exceeds eviction threshold
-        # Using 4 chars per token as a conservative approximation (actual ratio varies by content)
-        # This errs on the high side to avoid premature eviction of content that might fit
-        if len(content_str) <= 4 * self.tool_token_limit_before_evict:
+        if len(content_str) <= NUM_CHARS_PER_TOKEN * self.tool_token_limit_before_evict:
             return message, None
 
         # Write content to filesystem
@@ -1057,8 +1163,8 @@ class FilesystemMiddleware(AgentMiddleware):
         if result.error:
             return message, None
 
-        # Create truncated preview for the replacement message
-        content_sample = format_content_with_line_numbers([line[:1000] for line in content_str.splitlines()[:10]], start_line=1)
+        # Create preview showing head and tail of the result
+        content_sample = _create_content_preview(content_str)
         replacement_text = TOO_LARGE_TOOL_MSG.format(
             tool_call_id=message.tool_call_id,
             file_path=file_path,
@@ -1103,10 +1209,7 @@ class FilesystemMiddleware(AgentMiddleware):
             # Multiple blocks or non-text content - stringify entire structure
             content_str = str(message.content)
 
-        # Check if content exceeds eviction threshold
-        # Using 4 chars per token as a conservative approximation (actual ratio varies by content)
-        # This errs on the high side to avoid premature eviction of content that might fit
-        if len(content_str) <= 4 * self.tool_token_limit_before_evict:
+        if len(content_str) <= NUM_CHARS_PER_TOKEN * self.tool_token_limit_before_evict:
             return message, None
 
         # Write content to filesystem using async method
@@ -1116,8 +1219,8 @@ class FilesystemMiddleware(AgentMiddleware):
         if result.error:
             return message, None
 
-        # Create truncated preview for the replacement message
-        content_sample = format_content_with_line_numbers([line[:1000] for line in content_str.splitlines()[:10]], start_line=1)
+        # Create preview showing head and tail of the result
+        content_sample = _create_content_preview(content_str)
         replacement_text = TOO_LARGE_TOOL_MSG.format(
             tool_call_id=message.tool_call_id,
             file_path=file_path,
@@ -1248,7 +1351,7 @@ class FilesystemMiddleware(AgentMiddleware):
         Returns:
             The raw ToolMessage, or a pseudo tool message with the ToolResult in state.
         """
-        if self.tool_token_limit_before_evict is None or request.tool_call["name"] in TOOL_GENERATORS:
+        if self.tool_token_limit_before_evict is None or request.tool_call["name"] in TOOLS_EXCLUDED_FROM_EVICTION:
             return handler(request)
 
         tool_result = handler(request)
@@ -1268,7 +1371,7 @@ class FilesystemMiddleware(AgentMiddleware):
         Returns:
             The raw ToolMessage, or a pseudo tool message with the ToolResult in state.
         """
-        if self.tool_token_limit_before_evict is None or request.tool_call["name"] in TOOL_GENERATORS:
+        if self.tool_token_limit_before_evict is None or request.tool_call["name"] in TOOLS_EXCLUDED_FROM_EVICTION:
             return await handler(request)
 
         tool_result = await handler(request)
